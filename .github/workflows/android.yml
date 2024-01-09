@@ -1,0 +1,72 @@
+name: Build, Deploy
+
+on:
+  push:
+    branches: [ "master", "4.0-dev" ]
+  pull_request:
+    branches: [ "master", "4.0-dev" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: "17"
+          distribution: "zulu"
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Decrypt keystore
+        env:
+          RELEASE_ENCRYPT_SECRET_KEY: ${{ secrets.RELEASE_ENCRYPT_SECRET_KEY }}
+        run: openssl aes-256-cbc -d -in "${{ github.workspace }}/${{ vars.RELEASE_KEYSTORE }}.encrypted" -k $RELEASE_ENCRYPT_SECRET_KEY -md md5 >> ${{ github.workspace }}/${{ vars.RELEASE_KEYSTORE }}
+
+      - name: Generate keystore.properties
+        env:
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASEKEYPASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASESTOREPASSWORD }}
+        run: printf 'releaseKeyAlias=%s\nreleaseKeyPassword=%s\nreleaseKeyStore=%s\nreleaseStorePassword=%s' ${{ vars.RELEASE_KEY_ALIAS }} $RELEASE_KEY_PASSWORD ${{ vars.RELEASE_KEYSTORE }} $RELEASE_STORE_PASSWORD > ${{ github.workspace }}/keystore.properties
+
+      - name: Build with Gradle
+        run: ./gradlew clean packageRelease
+
+      - name: Read Output Metadata
+        if: ${{ success() }}
+        id: read_output_metadata
+        uses: juliangruber/read-file-action@v1
+        with:
+          path: ${{ github.workspace }}/app/build/outputs/apk/release/output-metadata.json
+
+      - name: Upload Package
+        if: ${{ success() }}
+        env:
+          output_file: ${{ fromJSON(steps.read_output_metadata.outputs.content).elements[0].outputFile }}
+        uses: actions/upload-artifact@v3.1.2
+        with:
+          name: ${{ env.output_file }}
+          path: ${{ github.workspace }}/app/build/outputs/apk/release/${{ env.output_file }}
+
+      - name: Upload Mapping
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v3.1.2
+        with:
+          name: mapping
+          path: ${{ github.workspace }}/app/build/outputs/mapping/release
+
+      - name: Upload Mapping to App Center
+        if: ${{ success() }}
+        env:
+          version_code: ${{ fromJSON(steps.read_output_metadata.outputs.content).elements[0].versionCode }}
+          version_name: ${{ fromJSON(steps.read_output_metadata.outputs.content).elements[0].versionName }}
+        uses: saurav-aggarwal/appcenter-cli-action@1.0.1
+        with:
+          node-version: 16.0.0
+          token: ${{ secrets.APP_CENTER_TOKEN }}
+          command: appcenter crashes upload-mappings -c ${{ env.version_code }} -n ${{ env.version_name }} -m /github/workspace/app/build/outputs/mapping/release/mapping.txt -a huanchengfly/TiebaLite
